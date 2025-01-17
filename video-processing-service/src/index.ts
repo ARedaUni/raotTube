@@ -20,18 +20,43 @@ app.use(express.json());
 
 // Health check / root
 app.get('/', (req: Request, res: Response) => {
-  res.send('Cloud Run transcoding service is up');
+  res.send('Cloud Run transcoding service is up my dude');
 });
 
 // 4. Pub/Sub push endpoint
 //    Expects a JSON body: { videoId, rawFilePath }
 //    The rawFilePath is something like gs://my-bucket/raw/video123.mp4
 app.post('/transcode', async (req: Request, res: Response) => {
+  // Add timeout tracking
+  const startTime = Date.now();
+  const MAX_PROCESSING_TIME = 540000; // 9 minutes (leaving buffer before Pub/Sub timeout)
+
   try {
-    // Pub/Sub message can come in different structures; ensure we parse it correctly.
-    // If you're using a push subscription with "service account", you typically get the raw
-    // pubsubMessage in the request body. For simplicity, assume it is in normal JSON form:
-    const { videoId, rawFilePath } = req.body;
+    // Parse the Pub/Sub message
+    const message = req.body?.message;
+      if (!message || !message.data) {
+        console.error('Missing Pub/Sub message or data');
+        return res.status(400).json({ error: 'Missing Pub/Sub message or data' });
+      }
+
+      let data;
+      try {
+        data = JSON.parse(Buffer.from(message.data, 'base64').toString());
+      } catch (error) {
+        console.error('Failed to decode or parse Pub/Sub message:', error);
+        return res.status(400).json({ error: 'Invalid Pub/Sub message format' });
+      }
+      
+      const { bucket, name } = data;
+      if (!bucket || !name) {
+        console.error('Missing bucket or name in Pub/Sub message');
+        return res.status(400).json({ error: 'Missing bucket or name in Pub/Sub message' });
+      }
+      console.log('Full request body:', JSON.stringify(req.body, null, 2));
+
+      
+    const videoId = path.parse(data.name).name; // Extract filename without extension
+    const rawFilePath = `gs://${data.bucket}/${data.name}`;
 
     if (!videoId || !rawFilePath) {
       return res.status(400).json({ error: 'Missing videoId or rawFilePath' });
@@ -41,10 +66,26 @@ app.post('/transcode', async (req: Request, res: Response) => {
     const [bucketName, ...filePathArr] = rawFilePath.replace('gs://', '').split('/');
     const filePath = filePathArr.join('/');
 
+    // Check processing time before each major operation
+    if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+      throw new Error('Processing timeout exceeded');
+    }
+
     // 5. Download raw video to ephemeral /tmp storage
     const tempInputFile = path.join('/tmp', `${videoId}_input.mp4`);
     await storage.bucket(bucketName).file(filePath).download({ destination: tempInputFile });
     console.log(`Downloaded raw video to ${tempInputFile}`);
+
+    // Add after downloading the input file
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg.ffprobe(tempInputFile, (err, metadata) => {
+        if (err) reject(err);
+        if (!metadata.streams?.length) {
+          reject(new Error('Invalid video file'));
+        }
+        resolve();
+      });
+    });
 
     // We'll create two local output files for 360p and 720p
     const temp360File = path.join('/tmp', `${videoId}_360.mp4`);
@@ -82,10 +123,15 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // 9. Update Firestore metadata
     //    We'll assume there's a "videos" collection with docs keyed by "videoId".
     await db.collection('videos').doc(videoId).update({
-      status: 'TRANSCODED',
+      status: 'PROCESSING_360P',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // After 360p complete
+    await db.collection('videos').doc(videoId).update({
+      status: 'PROCESSING_720P',
       processedFiles: {
-        '360p': `gs://${bucketName}/${processed360}`,
-        '720p': `gs://${bucketName}/${processed720}`,
+        '360p': `gs://${bucketName}/${processed360}`
       },
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -98,13 +144,18 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // 11. Acknowledge the push request
     return res.status(200).json({ message: 'Transcoding completed successfully' });
   } catch (error: any) {
+    // Add specific error handling for timeouts
+    if (error.message === 'Processing timeout exceeded') {
+      console.error('Processing timeout - message will be redelivered');
+      return res.status(429).json({ error: 'Processing timeout' });
+    }
     console.error('Error during transcoding:', error);
     return res.status(500).json({ error: error.message });
   }
 });
 
 // Start the server in dev mode (3000). In Cloud Run, we typically run on PORT=8080
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log(`Video processing service running on port ${port}`);
 });
