@@ -1,5 +1,5 @@
 # Build stage
-FROM node:18 AS builder
+FROM node:18-alpine AS builder
 
 WORKDIR /app
 
@@ -16,16 +16,13 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:18
+FROM node:18-alpine
 
 # Set non-interactive frontend for apt-get
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install FFmpeg (retry on failure and handle missing packages)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ffmpeg
 
 WORKDIR /app
 

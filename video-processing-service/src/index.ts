@@ -5,159 +5,168 @@ import admin from 'firebase-admin';
 import path from 'path';
 import fs from 'fs';
 
-// 1. Initialize Firebase Admin for Firestore
-//    In Cloud Run, you'll rely on the default service account or a custom service account
-//    with permissions to access Firestore & GCS.
+// 1. Initialize Firebase Admin (needed for Firestore updates)
 admin.initializeApp();
+
+// Firestore instance
 const db = admin.firestore();
 
-// 2. Initialize GCS client
+// 2. Initialize the Google Cloud Storage client
 const storage = new Storage();
 
 // 3. Create Express app
 const app: Express = express();
 app.use(express.json());
 
-// Health check / root
+// Health check / root endpoint
 app.get('/', (req: Request, res: Response) => {
-  res.send('Cloud Run transcoding service is up my dude');
+  res.send('Cloud Run transcoding service is up and running');
 });
 
-// 4. Pub/Sub push endpoint
-//    Expects a JSON body: { videoId, rawFilePath }
-//    The rawFilePath is something like gs://my-bucket/raw/video123.mp4
+/**
+ * 4. Transcode Endpoint:
+ *    - Triggered by a Pub/Sub push subscription (or direct HTTP).
+ *    - Expects JSON containing at least { videoId, bucket, name }.
+ *    - GCS input file => /tmp => transcode => new GCS objects => Firestore update.
+ */
 app.post('/transcode', async (req: Request, res: Response) => {
-  // Add timeout tracking
-  const startTime = Date.now();
-  const MAX_PROCESSING_TIME = 540000; // 9 minutes (leaving buffer before Pub/Sub timeout)
-
   try {
-    // Parse the Pub/Sub message
+    // Extract Pub/Sub message or direct request fields
+    // Example Pub/Sub push JSON: { "message": { "data": "<base64>" } }
     const message = req.body?.message;
-      if (!message || !message.data) {
-        console.error('Missing Pub/Sub message or data');
-        return res.status(400).json({ error: 'Missing Pub/Sub message or data' });
-      }
-
-      let data;
-      try {
-        data = JSON.parse(Buffer.from(message.data, 'base64').toString());
-      } catch (error) {
-        console.error('Failed to decode or parse Pub/Sub message:', error);
-        return res.status(400).json({ error: 'Invalid Pub/Sub message format' });
-      }
-      
-      const { bucket, name } = data;
-      if (!bucket || !name) {
-        console.error('Missing bucket or name in Pub/Sub message');
-        return res.status(400).json({ error: 'Missing bucket or name in Pub/Sub message' });
-      }
-      console.log('Full request body:', JSON.stringify(req.body, null, 2));
-
-      
-    const videoId = path.parse(data.name).name; // Extract filename without extension
-    const rawFilePath = `gs://${data.bucket}/${data.name}`;
-
-    if (!videoId || !rawFilePath) {
-      return res.status(400).json({ error: 'Missing videoId or rawFilePath' });
+    if (!message || !message.data) {
+      console.error('Missing Pub/Sub message or data');
+      return res.status(400).json({ error: 'Missing Pub/Sub message or data' });
     }
 
-    // Extract bucket name and file path from the "gs://bucketName/filename" string.
+    let data;
+    try {
+      data = JSON.parse(Buffer.from(message.data, 'base64').toString());
+    } catch (error) {
+      console.error('Failed to decode or parse Pub/Sub message:', error);
+      return res.status(400).json({ error: 'Invalid Pub/Sub message format' });
+    }
+
+    // data is expected to have: { videoId, bucket, name }
+    const { videoId, bucket, name } = data;
+    if (!videoId || !bucket || !name) {
+      console.error('Missing required fields in message data');
+      return res.status(400).json({ error: 'Missing videoId, bucket, or name' });
+    }
+
+    // The raw file path (e.g., gs://my-bucket/raw/video123.mp4)
+    const rawFilePath = `gs://${bucket}/${name}`;
+    console.log('Pub/Sub message data:', JSON.stringify(data, null, 2));
+    console.log(`Raw file path: ${rawFilePath}`);
+
+    // Parse bucketName and filePath from "gs://bucketName/filename"
     const [bucketName, ...filePathArr] = rawFilePath.replace('gs://', '').split('/');
     const filePath = filePathArr.join('/');
 
-    // Check processing time before each major operation
-    if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-      throw new Error('Processing timeout exceeded');
-    }
-
-    // 5. Download raw video to ephemeral /tmp storage
+    // Prepare local paths in ephemeral /tmp
     const tempInputFile = path.join('/tmp', `${videoId}_input.mp4`);
-    await storage.bucket(bucketName).file(filePath).download({ destination: tempInputFile });
-    console.log(`Downloaded raw video to ${tempInputFile}`);
+    const temp360File = path.join('/tmp', `${videoId}_360.mp4`);
+    const temp720File = path.join('/tmp', `${videoId}_720.mp4`);
 
-    // Add after downloading the input file
+    // Download raw input from GCS
+    await storage.bucket(bucketName).file(filePath).download({ destination: tempInputFile });
+    console.log(`Downloaded raw video to: ${tempInputFile}`);
+
+    // Optional: Perform a quick ffprobe to validate the input
     await new Promise<void>((resolve, reject) => {
       ffmpeg.ffprobe(tempInputFile, (err, metadata) => {
-        if (err) reject(err);
-        if (!metadata.streams?.length) {
-          reject(new Error('Invalid video file'));
-        }
+        if (err) return reject(err);
+        console.log('Input video metadata:', metadata.format);
         resolve();
       });
     });
 
-    // We'll create two local output files for 360p and 720p
-    const temp360File = path.join('/tmp', `${videoId}_360.mp4`);
-    const temp720File = path.join('/tmp', `${videoId}_720.mp4`);
-
-    // 6. Transcode to 360p
+    // 5. Transcode to 360p with explicit codecs
     await new Promise<void>((resolve, reject) => {
       ffmpeg(tempInputFile)
-        .outputOptions('-vf', 'scale=-1:360')
-        .on('end', () => resolve())
-        .on('error', (err) => reject(err))
+        .videoCodec('libx264')       // H.264 video
+        .audioCodec('aac')          // AAC audio
+        // Additional output options:
+        .outputOptions([
+          '-vf scale=-1:360',       // Scale video to 360p, keeping aspect ratio
+          '-preset fast',           // Faster preset
+          '-crf 23'                 // Constant Rate Factor for video quality
+        ])
+        .on('start', (cmdLine) => console.log('FFmpeg 360p command:', cmdLine))
+        .on('end', () => {
+          console.log('Transcoding to 360p finished');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('Error transcoding to 360p:', err);
+          reject(err);
+        })
         .save(temp360File);
     });
-    console.log('360p transcoding finished');
 
-    // 7. Transcode to 720p
+    // 6. Transcode to 720p with explicit codecs
     await new Promise<void>((resolve, reject) => {
       ffmpeg(tempInputFile)
-        .outputOptions('-vf', 'scale=-1:720')
-        .on('end', () => resolve())
-        .on('error', (err) => reject(err))
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .outputOptions([
+          '-vf scale=-1:720',
+          '-preset fast',
+          '-crf 23'
+        ])
+        .on('start', (cmdLine) => console.log('FFmpeg 720p command:', cmdLine))
+        .on('end', () => {
+          console.log('Transcoding to 720p finished');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('Error transcoding to 720p:', err);
+          reject(err);
+        })
         .save(temp720File);
     });
-    console.log('720p transcoding finished');
 
-    // 8. Upload processed files to GCS
+    // 7. Upload processed files back to GCS
+    //    NOTE: GCS automatically "creates" directories if they do not exist.
+    //    We simply specify the destination path, and GCS handles the rest.
     const processed360 = `processed/${videoId}/360p.mp4`;
     const processed720 = `processed/${videoId}/720p.mp4`;
 
     await storage.bucket(bucketName).upload(temp360File, { destination: processed360 });
+    console.log(`Uploaded 360p to: gs://${bucketName}/${processed360}`);
+
     await storage.bucket(bucketName).upload(temp720File, { destination: processed720 });
-    console.log(`Uploaded 360p -> gs://${bucketName}/${processed360}`);
-    console.log(`Uploaded 720p -> gs://${bucketName}/${processed720}`);
+    console.log(`Uploaded 720p to: gs://${bucketName}/${processed720}`);
 
-    // 9. Update Firestore metadata
-    //    We'll assume there's a "videos" collection with docs keyed by "videoId".
+    // 8. Update Firestore doc (videos/{videoId})
+    //    We'll mark that transcoding is done and store processed file paths
     await db.collection('videos').doc(videoId).update({
-      status: 'PROCESSING_360P',
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    // After 360p complete
-    await db.collection('videos').doc(videoId).update({
-      status: 'PROCESSING_720P',
+      status: 'TRANSCODED',
       processedFiles: {
-        '360p': `gs://${bucketName}/${processed360}`
+        '360p': `gs://${bucketName}/${processed360}`,
+        '720p': `gs://${bucketName}/${processed720}`
       },
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
+    console.log(`Firestore updated for videoId=${videoId}`);
 
-    // 10. Clean up local temp files
+    // 9. Clean up local files
     fs.unlinkSync(tempInputFile);
     fs.unlinkSync(temp360File);
     fs.unlinkSync(temp720File);
+    console.log('Local temporary files removed');
 
-    // 11. Acknowledge the push request
     return res.status(200).json({ message: 'Transcoding completed successfully' });
   } catch (error: any) {
-    // Add specific error handling for timeouts
-    if (error.message === 'Processing timeout exceeded') {
-      console.error('Processing timeout - message will be redelivered');
-      return res.status(429).json({ error: 'Processing timeout' });
-    }
     console.error('Error during transcoding:', error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// Start the server in dev mode (3000). In Cloud Run, we typically run on PORT=8080
+// 10. Start server: In Cloud Run, the PORT is typically 8080
 const port = process.env.PORT || 8080;
 app.listen(port, () => {
-  console.log(`Video processing service running on port ${port}`);
+  console.log(`Transcoding service running on port ${port}`);
 });
 
 export default app;
