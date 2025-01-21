@@ -8,14 +8,13 @@ import fs from 'fs';
 // Configuration constants
 const BUCKET_NAME = 'raot-tube-videos-processed';
 const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'mkv'];
-const PROCESSING_TIMEOUT = 900000; // 30 minutes
+const PROCESSING_TIMEOUT = 900000; // 15 minutes
 const VIDEO_QUALITIES = {
   '360p': { height: 360, crf: 23 },
   '720p': { height: 720, crf: 23 }
 };
 
 // Initialize Firebase Admin with explicit credential loading
-// In production, Cloud Run will use the service account assigned to it
 try {
   admin.initializeApp({
     credential: admin.credential.applicationDefault()
@@ -35,14 +34,14 @@ const storage = new Storage();
 const app: Express = express();
 app.use(express.json());
 
-// Add this at the start of your Cloud Run service
+// Request logging middleware
 app.use((req, res, next) => {
   console.log('Incoming request headers:', req.headers);
   console.log('Incoming request body:', JSON.stringify(req.body, null, 2));
   next();
 });
 
-// Define TypeScript interfaces for better type safety
+// Define TypeScript interfaces
 interface VideoMetadata {
   duration?: number;
   format?: string;
@@ -56,29 +55,24 @@ interface ProcessingJob {
   name: string;
 }
 
-// Define interface for Cloud Storage notification
-interface CloudStorageNotification {
-  kind: string;
-  id: string;
-  selfLink: string;
-  name: string;
-  bucket: string;
-  generation: string;
-  metageneration: string;
-  contentType: string;
-  timeCreated: string;
-  updated: string;
-  storageClass: string;
-  size: string;
-  md5Hash: string;
-  mediaLink: string;
-  contentEncoding: string;
-  contentDisposition: string;
-  eventType: string;
-  eventTime: string;
+// Updated Cloud Storage event interface
+interface CloudStorageEvent {
+  data: {
+    bucket: string;
+    name: string;
+    metageneration: string;
+    timeCreated: string;
+    updated: string;
+  };
+  attributes: {
+    eventType: string;
+    bucketId: string;
+    objectId: string;
+    payloadFormat: string;
+  };
 }
 
-// Enhanced video transcoding function with better error handling and logging
+// Video transcoding function
 function transcodeVideo(
   inputPath: string, 
   outputPath: string, 
@@ -92,9 +86,9 @@ function transcodeVideo(
       .audioCodec('aac')
       .outputOptions([
         `-vf scale=-2:${quality.height}`,
-        '-preset medium', // Better quality-to-compression ratio than 'fast'
+        '-preset medium',
         `-crf ${quality.crf}`,
-        '-movflags +faststart' // Enables streaming playback
+        '-movflags +faststart'
       ])
       .on('progress', (progress) => {
         if (progress?.percent) {
@@ -123,7 +117,7 @@ function transcodeVideo(
   });
 }
 
-// Helper function to validate video metadata
+// Video validation function
 async function validateVideo(filePath: string): Promise<VideoMetadata> {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
@@ -182,51 +176,64 @@ app.post('/transcode', async (req: Request, res: Response) => {
   try {
     console.log(`Starting job ${processingId}`);
     console.log('Raw request body:', JSON.stringify(req.body, null, 2));
+    console.log('Message data:', req.body.message?.data);
+    console.log('Direct data:', req.body.data);
 
-    // Parse Cloud Storage notification
-    let storageNotification: CloudStorageNotification;
+    // Parse Cloud Storage event
+    let storageEvent: CloudStorageEvent;
     
     try {
       if (req.body.message?.data) {
         // Decode base64 Pub/Sub message
         const decodedData = Buffer.from(req.body.message.data, 'base64').toString();
-        console.log('Decoded Cloud Storage notification:', decodedData);
-        storageNotification = JSON.parse(decodedData);
+        console.log('Decoded Cloud Storage event:', decodedData);
+        const parsedData = JSON.parse(decodedData);
+        
+        // Handle both new and legacy event formats
+        storageEvent = {
+          data: {
+            bucket: parsedData.bucket || parsedData.bucketId,
+            name: parsedData.name || parsedData.objectId,
+            metageneration: parsedData.metageneration,
+            timeCreated: parsedData.timeCreated,
+            updated: parsedData.updated
+          },
+          attributes: {
+            eventType: parsedData.eventType,
+            bucketId: parsedData.bucket || parsedData.bucketId,
+            objectId: parsedData.name || parsedData.objectId,
+            payloadFormat: 'JSON_API_V1'
+          }
+        };
+      } else if (req.body.data) {
+        // Direct Cloud Storage event format
+        storageEvent = req.body as CloudStorageEvent;
       } else {
-        throw new Error('Invalid Pub/Sub message format');
+        throw new Error('Invalid event format');
       }
+
+      // Validate required fields
+      if (!storageEvent.data.bucket || !storageEvent.data.name) {
+        throw new Error('Missing required fields in message data');
+      }
+
     } catch (error) {
-      console.error('Failed to parse Cloud Storage notification:', error);
+      console.error('Failed to parse Cloud Storage event:', error);
       throw error;
     }
 
     // Extract video ID from the file name
-    // Assuming your files are named like: "videos/{videoId}/original.mp4"
-    const pathParts = storageNotification.name.split('/');
-    const videoId = pathParts.length > 1 ? pathParts[1] : storageNotification.name;
+    const pathParts = storageEvent.data.name.split('/');
+    const videoId = pathParts.length > 1 ? pathParts[1] : storageEvent.data.name;
 
     // Create processing job data
     data = {
       videoId,
-      bucket: storageNotification.bucket,
-      name: storageNotification.name
+      bucket: storageEvent.data.bucket,
+      name: storageEvent.data.name
     };
 
     console.log('Created processing job:', data);
-
-    // Validate all required fields
-    if (!data.videoId) {
-      console.error('Invalid data structure:', data);
-      throw new Error('Could not determine videoId from file path');
-    }
-    if (!data.bucket) {
-      console.error('Invalid data structure:', data);
-      throw new Error('Missing bucket in notification');
-    }
-    if (!data.name) {
-      console.error('Invalid data structure:', data);
-      throw new Error('Missing name in notification');
-    }
 
     // Check if video is already processed
     const docRef = db.collection('videos').doc(data.videoId);
