@@ -134,6 +134,7 @@ app.get('/', (req: Request, res: Response) => {
 app.post('/transcode', async (req: Request, res: Response) => {
   const processingId = `process_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const tempFiles: string[] = [];
+  let data: ProcessingJob | undefined;
   
   // Cleanup helper
   const cleanup = () => {
@@ -163,17 +164,16 @@ app.post('/transcode', async (req: Request, res: Response) => {
       throw new Error('Invalid Pub/Sub message: missing data field');
     }
 
-    let data: ProcessingJob;
     try {
       const decodedData = Buffer.from(pubSubMessage.data, 'base64').toString();
       console.log('Decoded message data:', decodedData);
       data = JSON.parse(decodedData);
     } catch (parseError) {
-      throw new Error(`Failed to parse message data: ${parseError.message}`);
+      throw new Error(`Failed to parse message data: ${(parseError as Error).message}`);
     }
 
     // Validate all required fields
-    if (!data.videoId) {
+    if (!data?.videoId) {
       throw new Error('Missing videoId in message data');
     }
     if (!data.bucket) {
@@ -254,9 +254,8 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     // Try to update Firestore with error status
     try {
-      const videoId = data?.videoId;
-      if (videoId) {
-        await db.collection('videos').doc(videoId).update({
+      if (data?.videoId) {
+        await db.collection('videos').doc(data.videoId).update({
           status: 'ERROR',
           error: error.message,
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
