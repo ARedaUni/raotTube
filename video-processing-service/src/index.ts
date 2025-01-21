@@ -157,6 +157,10 @@ app.get('/', (req: Request, res: Response) => {
 app.post('/transcode', async (req: Request, res: Response) => {
   const processingId = `process_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const tempFiles: string[] = [];
+  console.log(`Starting job ${processingId}`);
+  console.log('Raw request body:', JSON.stringify(req.body, null, 2));
+  console.log('Message data:', req.body.message?.data);
+  console.log('Direct data:', req.body.data);
   let data: ProcessingJob | undefined;
   
   // Cleanup helper
@@ -172,10 +176,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
     });
   };
-  console.log(`Starting job ${processingId}`);
-  console.log('Raw request body:', JSON.stringify(req.body, null, 2));
-  console.log('Message data:', req.body.message?.data);
-  console.log('Direct data:', req.body.data);
+ 
   try {
     console.log(`Starting job ${processingId}`);
     console.log('Raw request body:', JSON.stringify(req.body, null, 2));
@@ -216,9 +217,9 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
 
       // Validate required fields
-      if (!storageEvent.data.bucket || !storageEvent.data.name) {
-        throw new Error('Missing required fields in message data');
-      }
+      // if (!storageEvent.data.bucket || !storageEvent.data.name) {
+      //   throw new Error('Missing required fields in message data');
+      // }
 
     } catch (error) {
       console.error('Failed to parse Cloud Storage event:', error);
