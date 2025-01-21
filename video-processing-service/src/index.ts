@@ -234,7 +234,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       name: storageEvent.data.name
     };
 
-    console.log('Created processing job:', data);
+    console.log('Created processing data job:', data);
 
     // Check if video is already processed
     const docRef = db.collection('videos').doc(data.videoId);
