@@ -172,7 +172,10 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
     });
   };
-
+  console.log(`Starting job ${processingId}`);
+  console.log('Raw request body:', JSON.stringify(req.body, null, 2));
+  console.log('Message data:', req.body.message?.data);
+  console.log('Direct data:', req.body.data);
   try {
     console.log(`Starting job ${processingId}`);
     console.log('Raw request body:', JSON.stringify(req.body, null, 2));
