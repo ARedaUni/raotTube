@@ -151,25 +151,49 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
   try {
     console.log(`Starting job ${processingId}`);
+    console.log('Received request body:', JSON.stringify(req.body, null, 2));
 
-    // Parse and validate Pub/Sub message
-    const message = req.body?.message;
-    if (!message?.data) {
-      throw new Error('Invalid Pub/Sub message format');
+    // Enhanced Pub/Sub message validation
+    if (!req.body?.message) {
+      throw new Error('Invalid request: missing message object');
     }
 
-    const data: ProcessingJob = JSON.parse(Buffer.from(message.data, 'base64').toString());
-    const { videoId, bucket, name } = data;
-
-    if (!videoId || !bucket || !name) {
-      throw new Error('Missing required fields in message data');
+    const pubSubMessage = req.body.message;
+    if (!pubSubMessage.data) {
+      throw new Error('Invalid Pub/Sub message: missing data field');
     }
+
+    let data: ProcessingJob;
+    try {
+      const decodedData = Buffer.from(pubSubMessage.data, 'base64').toString();
+      console.log('Decoded message data:', decodedData);
+      data = JSON.parse(decodedData);
+    } catch (parseError) {
+      throw new Error(`Failed to parse message data: ${parseError.message}`);
+    }
+
+    // Validate all required fields
+    if (!data.videoId) {
+      throw new Error('Missing videoId in message data');
+    }
+    if (!data.bucket) {
+      throw new Error('Missing bucket in message data');
+    }
+    if (!data.name) {
+      throw new Error('Missing name in message data');
+    }
+
+    console.log('Validated processing job:', {
+      videoId: data.videoId,
+      bucket: data.bucket,
+      name: data.name
+    });
 
     // Check if video is already processed
-    const docRef = db.collection('videos').doc(videoId);
+    const docRef = db.collection('videos').doc(data.videoId);
     const doc = await docRef.get();
     if (doc.exists && doc.data()?.status === 'TRANSCODED') {
-      console.log(`Video ${videoId} already processed, skipping`);
+      console.log(`Video ${data.videoId} already processed, skipping`);
       return res.status(200).json({ message: 'Already processed' });
     }
 
@@ -181,12 +205,12 @@ app.post('/transcode', async (req: Request, res: Response) => {
     }, { merge: true });
 
     // Setup temporary file paths
-    const tempInputFile = path.join('/tmp', `${videoId}_input.mp4`);
+    const tempInputFile = path.join('/tmp', `${data.videoId}_input.mp4`);
     tempFiles.push(tempInputFile);
 
     // Download source file
-    console.log(`Downloading source file from gs://${bucket}/${name}`);
-    await storage.bucket(bucket).file(name).download({ destination: tempInputFile });
+    console.log(`Downloading source file from gs://${data.bucket}/${data.name}`);
+    await storage.bucket(data.bucket).file(data.name).download({ destination: tempInputFile });
 
     // Validate video
     const metadata = await validateVideo(tempInputFile);
@@ -195,7 +219,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // Process each quality
     const processedFiles: Record<string, string> = {};
     for (const [quality, settings] of Object.entries(VIDEO_QUALITIES)) {
-      const tempOutputFile = path.join('/tmp', `${videoId}_${quality}.mp4`);
+      const tempOutputFile = path.join('/tmp', `${data.videoId}_${quality}.mp4`);
       tempFiles.push(tempOutputFile);
 
       // Skip transcoding if source is lower quality
@@ -207,7 +231,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       await transcodeVideo(tempInputFile, tempOutputFile, settings);
 
       // Upload to GCS
-      const destination = `processed/${videoId}/${quality}.mp4`;
+      const destination = `processed/${data.videoId}/${quality}.mp4`;
       await storage.bucket(BUCKET_NAME).upload(tempOutputFile, { destination });
       
       processedFiles[quality] = `gs://${BUCKET_NAME}/${destination}`;
@@ -221,7 +245,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       completedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`Successfully processed video ${videoId}`);
+    console.log(`Successfully processed video ${data.videoId}`);
     cleanup();
     return res.status(200).json({ message: 'Processing completed successfully' });
 
@@ -230,7 +254,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     // Try to update Firestore with error status
     try {
-      const videoId = JSON.parse(Buffer.from(req.body.message.data, 'base64').toString()).videoId;
+      const videoId = data?.videoId;
       if (videoId) {
         await db.collection('videos').doc(videoId).update({
           status: 'ERROR',
