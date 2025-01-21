@@ -149,6 +149,20 @@ async function validateVideo(filePath: string): Promise<VideoMetadata> {
   });
 }
 
+function sanitizeVideoId(videoId: string): string {
+  // Remove file extension
+  const withoutExtension = videoId.replace(/\.[^/.]+$/, "");
+  
+  // Replace special characters and spaces with hyphens
+  const sanitized = withoutExtension
+    .replace(/[^a-zA-Z0-9]/g, "-")
+    .replace(/-+/g, "-")  // Replace multiple hyphens with single hyphen
+    .toLowerCase();
+    
+  // Trim to reasonable length (e.g., 100 characters)
+  return sanitized.slice(0, 100);
+}
+
 // Health check endpoint
 app.get('/', (req: Request, res: Response) => {
   res.send('Video processing service is operational');
@@ -237,7 +251,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
     console.log('Created processing data job:', data);
 
     // Check if video is already processed
-    const docRef = db.collection('videos').doc(data.videoId);
+    const docRef = db.collection('videos').doc(sanitizeVideoId(data.videoId));
     try {
       const doc = await docRef.get();
       
@@ -245,8 +259,9 @@ app.post('/transcode', async (req: Request, res: Response) => {
         // Create the document if it doesn't exist
         await docRef.set({
           status: 'PROCESSING',
+          originalFileName: data.videoId,  // Store original filename
           startedAt: admin.firestore.FieldValue.serverTimestamp(),
-          processingId
+          bucket: data.bucket
         });
       } else if (doc.data()?.status === 'TRANSCODED') {
         console.log(`Video ${data.videoId} already processed, skipping`);
@@ -310,7 +325,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // Try to update Firestore with error status
     try {
       if (data?.videoId) {
-        await db.collection('videos').doc(data.videoId).update({
+        await db.collection('videos').doc(sanitizeVideoId(data.videoId)).update({
           status: 'ERROR',
           error: error.message,
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
