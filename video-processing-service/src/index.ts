@@ -238,18 +238,26 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     // Check if video is already processed
     const docRef = db.collection('videos').doc(data.videoId);
-    const doc = await docRef.get();
-    if (doc.exists && doc.data()?.status === 'TRANSCODED') {
-      console.log(`Video ${data.videoId} already processed, skipping`);
-      return res.status(200).json({ message: 'Already processed' });
-    }
+    try {
+      const doc = await docRef.get();
+      
+      if (!doc.exists) {
+        // Create the document if it doesn't exist
+        await docRef.set({
+          status: 'PROCESSING',
+          startedAt: admin.firestore.FieldValue.serverTimestamp(),
+          processingId
+        });
+      } else if (doc.data()?.status === 'TRANSCODED') {
+        console.log(`Video ${data.videoId} already processed, skipping`);
+        return res.status(200).json({ message: 'Already processed' });
+      }
 
-    // Update initial status
-    await docRef.set({
-      status: 'PROCESSING',
-      startedAt: admin.firestore.FieldValue.serverTimestamp(),
-      processingId
-    }, { merge: true });
+      // Continue with processing...
+    } catch (error) {
+      console.error('Error checking/creating video document:', error);
+      throw error;
+    }
 
     // Setup temporary file paths
     const tempInputFile = path.join('/tmp', `${data.videoId}_input.mp4`);
