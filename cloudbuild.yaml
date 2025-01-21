@@ -1,4 +1,7 @@
 # cloudbuild.yaml
+options:
+  logging: CLOUD_LOGGING_ONLY  # This fixes the logging error
+
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
@@ -18,7 +21,7 @@ steps:
       - '--image'
       - 'gcr.io/$PROJECT_ID/video-processor'
       - '--region'
-      - 'us-central1'  # replace with your preferred region
+      - 'us-central1'
       - '--platform'
       - 'managed'
       - '--memory'
