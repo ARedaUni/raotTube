@@ -35,6 +35,13 @@ const storage = new Storage();
 const app: Express = express();
 app.use(express.json());
 
+// Add this at the start of your Cloud Run service
+app.use((req, res, next) => {
+  console.log('Incoming request headers:', req.headers);
+  console.log('Incoming request body:', JSON.stringify(req.body, null, 2));
+  next();
+});
+
 // Define TypeScript interfaces for better type safety
 interface VideoMetadata {
   duration?: number;
@@ -47,6 +54,28 @@ interface ProcessingJob {
   videoId: string;
   bucket: string;
   name: string;
+}
+
+// Define interface for Cloud Storage notification
+interface CloudStorageNotification {
+  kind: string;
+  id: string;
+  selfLink: string;
+  name: string;
+  bucket: string;
+  generation: string;
+  metageneration: string;
+  contentType: string;
+  timeCreated: string;
+  updated: string;
+  storageClass: string;
+  size: string;
+  md5Hash: string;
+  mediaLink: string;
+  contentEncoding: string;
+  contentDisposition: string;
+  eventType: string;
+  eventTime: string;
 }
 
 // Enhanced video transcoding function with better error handling and logging
@@ -152,42 +181,52 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
   try {
     console.log(`Starting job ${processingId}`);
-    console.log('Received request body:', JSON.stringify(req.body, null, 2));
+    console.log('Raw request body:', JSON.stringify(req.body, null, 2));
 
-    // Enhanced Pub/Sub message validation
-    if (!req.body?.message) {
-      throw new Error('Invalid request: missing message object');
-    }
-
-    const pubSubMessage = req.body.message;
-    if (!pubSubMessage.data) {
-      throw new Error('Invalid Pub/Sub message: missing data field');
-    }
-
+    // Parse Cloud Storage notification
+    let storageNotification: CloudStorageNotification;
+    
     try {
-      const decodedData = Buffer.from(pubSubMessage.data, 'base64').toString();
-      console.log('Decoded message data:', decodedData);
-      data = JSON.parse(decodedData);
-    } catch (parseError) {
-      throw new Error(`Failed to parse message data: ${(parseError as Error).message}`);
+      if (req.body.message?.data) {
+        // Decode base64 Pub/Sub message
+        const decodedData = Buffer.from(req.body.message.data, 'base64').toString();
+        console.log('Decoded Cloud Storage notification:', decodedData);
+        storageNotification = JSON.parse(decodedData);
+      } else {
+        throw new Error('Invalid Pub/Sub message format');
+      }
+    } catch (error) {
+      console.error('Failed to parse Cloud Storage notification:', error);
+      throw error;
     }
+
+    // Extract video ID from the file name
+    // Assuming your files are named like: "videos/{videoId}/original.mp4"
+    const pathParts = storageNotification.name.split('/');
+    const videoId = pathParts.length > 1 ? pathParts[1] : storageNotification.name;
+
+    // Create processing job data
+    data = {
+      videoId,
+      bucket: storageNotification.bucket,
+      name: storageNotification.name
+    };
+
+    console.log('Created processing job:', data);
 
     // Validate all required fields
-    if (!data?.videoId) {
-      throw new Error('Missing videoId in message data');
+    if (!data.videoId) {
+      console.error('Invalid data structure:', data);
+      throw new Error('Could not determine videoId from file path');
     }
     if (!data.bucket) {
-      throw new Error('Missing bucket in message data');
+      console.error('Invalid data structure:', data);
+      throw new Error('Missing bucket in notification');
     }
     if (!data.name) {
-      throw new Error('Missing name in message data');
+      console.error('Invalid data structure:', data);
+      throw new Error('Missing name in notification');
     }
-
-    console.log('Validated processing job:', {
-      videoId: data.videoId,
-      bucket: data.bucket,
-      name: data.name
-    });
 
     // Check if video is already processed
     const docRef = db.collection('videos').doc(data.videoId);
