@@ -17,7 +17,8 @@ const VIDEO_QUALITIES = {
 // Initialize Firebase Admin with explicit credential loading
 try {
   admin.initializeApp({
-    credential: admin.credential.applicationDefault()
+    credential: admin.credential.applicationDefault(),
+    projectId: 'raottube-448010'
   });
 } catch (error) {
   console.error('Failed to initialize Firebase Admin:', error);
@@ -178,10 +179,6 @@ app.post('/transcode', async (req: Request, res: Response) => {
   };
  
   try {
-    console.log(`Starting job ${processingId}`);
-    console.log('Raw request body:', JSON.stringify(req.body, null, 2));
-    console.log('Message data:', req.body.message?.data);
-    console.log('Direct data:', req.body.data);
 
     // Parse Cloud Storage event
     let storageEvent: CloudStorageEvent;
@@ -217,9 +214,9 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
 
       // Validate required fields
-      // if (!storageEvent.data.bucket || !storageEvent.data.name) {
-      //   throw new Error('Missing required fields in message data');
-      // }
+      if (!storageEvent.data.bucket || !storageEvent.data.name) {
+        throw new Error('Missing required fields in message data');
+      }
 
     } catch (error) {
       console.error('Failed to parse Cloud Storage event:', error);
