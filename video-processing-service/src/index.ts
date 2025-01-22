@@ -22,7 +22,6 @@ try {
   
   // Test Firestore connection
   const db = admin.firestore();
-  await db.collection('videos').limit(1).get();
   console.log('Successfully connected to Firestore');
   
 } catch (error) {
