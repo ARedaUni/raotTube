@@ -265,27 +265,63 @@ app.post('/transcode', async (req: Request, res: Response) => {
     sanitizedId = sanitizeVideoId(data.videoId);
     console.log('Sanitized video ID:', sanitizedId);
     
+    /* Commenting out Firestore operations for debugging
     const docRef = db.collection('videos').doc(sanitizedId);
     console.log('Document path:', docRef.path);
+    console.log('Full Firestore path:', `${db.projectId}/databases/(default)/documents/${docRef.path}`);
 
+    // Test Firestore connection before transaction
+    try {
+      const testWrite = await db.collection('test').doc('connection-test').set({
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+      console.log('Test write successful');
+    } catch (testError) {
+      console.error('Test write failed:', testError);
+      throw new Error(`Firestore connection test failed: ${testError.message}`);
+    }
+
+    console.log('Starting Firestore transaction...');
+    
     // Create new document with atomic operation
-    await db.runTransaction(async (transaction) => {
-      const doc = await transaction.get(docRef);
-      
-      if (!doc.exists) {
-        transaction.set(docRef, {
-          status: 'PROCESSING',
-          originalFileName: data?.videoId,
-          startedAt: admin.firestore.FieldValue.serverTimestamp(),
-          bucket: data?.bucket
-        });
-      } else if (doc.data()?.status === 'TRANSCODED') {
-        console.log(`Video ${data?.videoId} already processed, skipping`);
-        return;
-      }
-    });
+    try {
+      await db.runTransaction(async (transaction) => {
+        console.log('Inside transaction - fetching document');
+        const doc = await transaction.get(docRef);
+        console.log('Transaction document fetch result - exists:', doc.exists);
+        
+        if (!doc.exists) {
+          console.log('Document does not exist, creating new document');
+          
+          // Try direct set instead of transaction
+          await docRef.set({
+            status: 'PROCESSING',
+            originalFileName: data?.videoId,
+            startedAt: admin.firestore.FieldValue.serverTimestamp(),
+            bucket: data?.bucket
+          });
+          console.log('Direct document creation successful');
+          
+        } else {
+          console.log('Document exists, current data:', doc.data());
+          if (doc.data()?.status === 'TRANSCODED') {
+            console.log(`Video ${data?.videoId} already processed, skipping`);
+            return;
+          }
+        }
+      });
 
-    console.log(`Successfully created/updated document for video ${sanitizedId}`);
+      console.log('Transaction completed successfully');
+    } catch (transactionError: any) {
+      console.error('Transaction failed with error:', {
+        message: transactionError.message,
+        code: transactionError.code,
+        details: transactionError.details,
+        stack: transactionError.stack
+      });
+      throw transactionError;
+    }
+    */
 
     // Setup temporary file paths
     const tempInputFile = path.join('/tmp', `${data.videoId}_input.mp4`);
@@ -320,6 +356,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       processedFiles[quality] = `gs://${BUCKET_NAME}/${destination}`;
     }
 
+    /* Commenting out Firestore update
     // Update Firestore with results
     await docRef.update({
       status: 'TRANSCODED',
@@ -327,6 +364,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       metadata,
       completedAt: admin.firestore.FieldValue.serverTimestamp()
     });
+    */
 
     console.log(`Successfully processed video ${data.videoId}`);
     cleanup();
@@ -341,9 +379,10 @@ app.post('/transcode', async (req: Request, res: Response) => {
       stack: error.stack
     });
 
+    /* Commenting out Firestore error update
     // Try to update Firestore with error status
     try {
-      if (data?.videoId && sanitizedId) { // Add check for sanitizedId
+      if (data?.videoId && sanitizedId) {
         const errorDocRef = db.collection('videos').doc(sanitizedId);
         await errorDocRef.update({
           status: 'ERROR',
@@ -354,6 +393,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
     } catch (dbError) {
       console.error('Failed to update error status:', dbError);
     }
+    */
 
     cleanup();
     return res.status(500).json({ error: error.message });
