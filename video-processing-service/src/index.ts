@@ -153,6 +153,7 @@ async function validateVideo(filePath: string): Promise<VideoMetadata> {
   });
 }
 
+// Add debug logging for document ID
 function sanitizeVideoId(videoId: string): string {
   // Remove file extension
   const withoutExtension = videoId.replace(/\.[^/.]+$/, "");
@@ -161,9 +162,15 @@ function sanitizeVideoId(videoId: string): string {
   const sanitized = withoutExtension
     .replace(/[^a-zA-Z0-9]/g, "-")
     .replace(/-+/g, "-")  // Replace multiple hyphens with single hyphen
+    .replace(/^-+|-+$/g, "")  // Remove leading/trailing hyphens
     .toLowerCase();
     
-  // Trim to reasonable length (e.g., 100 characters)
+  // Ensure we have a valid ID (non-empty)
+  if (!sanitized) {
+    return `video-${Date.now()}`;
+  }
+    
+  // Trim to reasonable length
   return sanitized.slice(0, 100);
 }
 
@@ -181,6 +188,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
   console.log('Message data:', req.body.message?.data);
   console.log('Direct data:', req.body.data);
   let data: ProcessingJob | undefined;
+  let sanitizedId = ''; // Initialize with empty string
   
   // Cleanup helper
   const cleanup = () => {
@@ -197,7 +205,6 @@ app.post('/transcode', async (req: Request, res: Response) => {
   };
  
   try {
-
     // Parse Cloud Storage event
     let storageEvent: CloudStorageEvent;
     
@@ -254,23 +261,31 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     console.log('Created processing data job:', data);
 
-    // Check if video is already processed
-    const docRef = db.collection('videos').doc(sanitizeVideoId(data.videoId));
-    try {
-      
-      // Create or update the document
-      await docRef.set({
-        status: 'PROCESSING',
-        originalFileName: data.videoId,
-        startedAt: admin.firestore.FieldValue.serverTimestamp(),
-        bucket: data.bucket
-      }, { merge: true }); // Add merge option for safety
-      console.log(`Video ${data.videoId} processing started.`);
+    // Sanitize the video ID and assign to our scoped variable
+    sanitizedId = sanitizeVideoId(data.videoId);
+    console.log('Sanitized video ID:', sanitizedId);
+    
+    const docRef = db.collection('videos').doc(sanitizedId);
+    console.log('Document path:', docRef.path);
 
-    } catch (error) {
-      console.error('Error checking/creating video document:', error);
-      throw error;
-    }
+    // Create new document with atomic operation
+    await db.runTransaction(async (transaction) => {
+      const doc = await transaction.get(docRef);
+      
+      if (!doc.exists) {
+        transaction.set(docRef, {
+          status: 'PROCESSING',
+          originalFileName: data?.videoId,
+          startedAt: admin.firestore.FieldValue.serverTimestamp(),
+          bucket: data?.bucket
+        });
+      } else if (doc.data()?.status === 'TRANSCODED') {
+        console.log(`Video ${data?.videoId} already processed, skipping`);
+        return;
+      }
+    });
+
+    console.log(`Successfully created/updated document for video ${sanitizedId}`);
 
     // Setup temporary file paths
     const tempInputFile = path.join('/tmp', `${data.videoId}_input.mp4`);
@@ -319,11 +334,18 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
   } catch (error: any) {
     console.error('Processing error:', error);
+    console.error('Error details:', {
+      error: error.message,
+      code: error.code,
+      details: error.details,
+      stack: error.stack
+    });
 
     // Try to update Firestore with error status
     try {
-      if (data?.videoId) {
-        await db.collection('videos').doc(sanitizeVideoId(data.videoId)).update({
+      if (data?.videoId && sanitizedId) { // Add check for sanitizedId
+        const errorDocRef = db.collection('videos').doc(sanitizedId);
+        await errorDocRef.update({
           status: 'ERROR',
           error: error.message,
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
