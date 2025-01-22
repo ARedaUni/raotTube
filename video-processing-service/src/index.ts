@@ -257,7 +257,6 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // Check if video is already processed
     const docRef = db.collection('videos').doc(sanitizeVideoId(data.videoId));
     try {
-      const doc = await docRef.get();
       
       // Create or update the document
       await docRef.set({
@@ -266,11 +265,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
         startedAt: admin.firestore.FieldValue.serverTimestamp(),
         bucket: data.bucket
       }, { merge: true }); // Add merge option for safety
-
-      if (doc.exists && doc.data()?.status === 'TRANSCODED') {
-        console.log(`Video ${data.videoId} already processed, skipping`);
-        return res.status(200).json({ message: 'Already processed' });
-      }
+      console.log(`Video ${data.videoId} processing started.`);
 
     } catch (error) {
       console.error('Error checking/creating video document:', error);
