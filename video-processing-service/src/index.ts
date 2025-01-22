@@ -17,11 +17,10 @@ const VIDEO_QUALITIES = {
 // Initialize Firebase Admin with explicit credential loading
 try {
   admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    projectId: 'raottube-448010'
+    credential: admin.credential.applicationDefault()
   });
 } catch (error) {
-  console.error('Failed to initialize Firebase Admin:', error);
+  console.error('Failed initialize Firebase Admin:', error);
   process.exit(1);
 }
 
