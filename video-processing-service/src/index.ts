@@ -19,8 +19,14 @@ try {
   admin.initializeApp({
     credential: admin.credential.applicationDefault()
   });
+  
+  // Test Firestore connection
+  const db = admin.firestore();
+  await db.collection('videos').limit(1).get();
+  console.log('Successfully connected to Firestore');
+  
 } catch (error) {
-  console.error('Failed initialize Firebase Admin:', error);
+  console.error('Failed to initialize Firebase Admin:', error);
   process.exit(1);
 }
 
@@ -254,20 +260,19 @@ app.post('/transcode', async (req: Request, res: Response) => {
     try {
       const doc = await docRef.get();
       
-      if (!doc.exists) {
-        // Create the document if it doesn't exist
-        await docRef.set({
-          status: 'PROCESSING',
-          originalFileName: data.videoId,  // Store original filename
-          startedAt: admin.firestore.FieldValue.serverTimestamp(),
-          bucket: data.bucket
-        });
-      } else if (doc.data()?.status === 'TRANSCODED') {
+      // Create or update the document
+      await docRef.set({
+        status: 'PROCESSING',
+        originalFileName: data.videoId,
+        startedAt: admin.firestore.FieldValue.serverTimestamp(),
+        bucket: data.bucket
+      }, { merge: true }); // Add merge option for safety
+
+      if (doc.exists && doc.data()?.status === 'TRANSCODED') {
         console.log(`Video ${data.videoId} already processed, skipping`);
         return res.status(200).json({ message: 'Already processed' });
       }
 
-      // Continue with processing...
     } catch (error) {
       console.error('Error checking/creating video document:', error);
       throw error;
