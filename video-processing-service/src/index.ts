@@ -361,6 +361,8 @@ try {
   process.exit(1);
 }
 
+
+
 // Initialise Firestore
 const db = admin.firestore();
 
@@ -515,10 +517,7 @@ app.get('/', (req: Request, res: Response) => {
 app.post('/transcode', async (req: Request, res: Response) => {
   const processingId = `process_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const tempFiles: string[] = [];
-  console.log(`Starting job ${processingId}`);
-  console.log('Raw request body:', JSON.stringify(req.body, null, 2));
-  console.log('Message data:', req.body.message?.data);
-  console.log('Direct data:', req.body.data);
+
   let data: ProcessingJob | undefined;
   let sanitizedId = '';
   
@@ -535,6 +534,27 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
     });
   };
+   // Add this right before the transcoding loop
+   try {
+    // Test Firestore write and read
+    const testDocRef = db.collection('health-checks').doc('transcode-service');
+    await testDocRef.set({
+      lastChecked: admin.firestore.FieldValue.serverTimestamp(),
+      serviceId: processingId,
+      videoId: sanitizedId
+    });
+
+    // Verify the write by immediately reading back
+    const testDoc = await testDocRef.get();
+    if (!testDoc.exists) {
+      throw new Error('Failed to write or read test document');
+    }
+    console.log('Firestore connectivity test passed successfully');
+  } catch (firestoreTestError) {
+    console.error('Firestore connectivity test failed:', firestoreTestError);
+    throw new Error(`Firestore test failed: ${(firestoreTestError as any).message}`);
+  }
+ 
  
   try {
     // Parse Cloud Storage event
@@ -593,6 +613,8 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     console.log('Created processing data job:', data);
 
+    
+
     // Sanitise the video ID and assign to our scoped variable
     sanitizedId = sanitizeVideoId(data.videoId);
     console.log('Sanitised video ID:', sanitizedId);
@@ -608,6 +630,8 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // Validate video
     const metadata = await validateVideo(tempInputFile);
     console.log('Video metadata:', metadata);
+
+    
 
     // Process each quality
     const processedFiles: Record<string, string> = {};
