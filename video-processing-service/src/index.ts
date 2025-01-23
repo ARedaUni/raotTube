@@ -361,8 +361,6 @@ try {
   process.exit(1);
 }
 
-
-
 // Initialise Firestore
 const db = admin.firestore();
 
@@ -436,11 +434,13 @@ function transcodeVideo(
       })
       .on('end', () => {
         console.log(`Completed ${quality.height}p transcode`);
+        clearTimeout(timeout);
         command.kill('SIGTERM');
         resolve();
       })
       .on('error', (err) => {
         console.error(`Error in ${quality.height}p transcode:`, err);
+        clearTimeout(timeout);
         command.kill('SIGKILL');
         reject(err);
       });
@@ -451,8 +451,7 @@ function transcodeVideo(
       reject(new Error(`FFmpeg process timed out for ${quality.height}p`));
     }, PROCESSING_TIMEOUT);
 
-    command.save(outputPath)
-      .on('end', () => clearTimeout(timeout));
+    command.save(outputPath);
   });
 }
 
@@ -534,27 +533,31 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
     });
   };
-   // Add this right before the transcoding loop
-   try {
-    // Test Firestore write and read
-    const testDocRef = db.collection('health-checks').doc('transcode-service');
+  
+  try {
+    // Test Firestore write and read with error handling
+    const testDocRef = db.collection('test-collection').doc('connectivity-test');
     await testDocRef.set({
       lastChecked: admin.firestore.FieldValue.serverTimestamp(),
       serviceId: processingId,
-      videoId: sanitizedId
-    });
+      status: 'active'
+    }, { merge: true }); // Add merge option for more resilient writes
 
     // Verify the write by immediately reading back
     const testDoc = await testDocRef.get();
     if (!testDoc.exists) {
-      throw new Error('Failed to write or read test document');
+      throw new Error('Failed to verify test document existence');
     }
     console.log('Firestore connectivity test passed successfully');
-  } catch (firestoreTestError) {
-    console.error('Firestore connectivity test failed:', firestoreTestError);
-    throw new Error(`Firestore test failed: ${(firestoreTestError as any).message}`);
+  } catch (firestoreTestError: any) {
+    console.error('Firestore connectivity test failed:', {
+      error: firestoreTestError.message,
+      code: firestoreTestError.code,
+      details: firestoreTestError.details
+    });
+    // Don't throw here - log the error but continue processing
+    console.warn('Continuing despite Firestore test failure');
   }
- 
  
   try {
     // Parse Cloud Storage event
@@ -613,8 +616,6 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     console.log('Created processing data job:', data);
 
-    
-
     // Sanitise the video ID and assign to our scoped variable
     sanitizedId = sanitizeVideoId(data.videoId);
     console.log('Sanitised video ID:', sanitizedId);
@@ -630,8 +631,6 @@ app.post('/transcode', async (req: Request, res: Response) => {
     // Validate video
     const metadata = await validateVideo(tempInputFile);
     console.log('Video metadata:', metadata);
-
-    
 
     // Process each quality
     const processedFiles: Record<string, string> = {};
@@ -686,9 +685,11 @@ app.post('/transcode', async (req: Request, res: Response) => {
       details: error.details,
       stack: error.stack
     });
-
-    cleanup();
+    
     return res.status(500).json({ error: error.message });
+  }
+  finally {
+    cleanup();
   }
 });
 
