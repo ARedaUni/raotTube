@@ -7,7 +7,7 @@ import fs from 'fs';
 import { createClient } from '@supabase/supabase-js';
 
 // Configuration constants
-const BUCKET_NAME = 'raot-tube-videos-processed';
+const PROCESSED_BUCKET = 'raot-tube-videos-processed';
 const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'mkv'];
 const PROCESSING_TIMEOUT = 900000; // 15 minutes
 const VIDEO_QUALITIES = {
@@ -15,16 +15,13 @@ const VIDEO_QUALITIES = {
   '720p': { height: 720, crf: 23 }
 };
 
-
-
-
-// Initialize Google Cloud Storage with default credentials
+// Initialise Google Cloud Storage with default credentials
 const storage = new Storage();
 
-// Initialize Supabase
+// Initialise Supabase with service role key to bypass RLS
 const supabaseUrl = 'https://zugtkkueffqrbdxcdlgv.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp1Z3Rra3VlZmZxcmJkeGNkbGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc2NDAxMDgsImV4cCI6MjA1MzIxNjEwOH0.tElLLh5rbcrB1EfJWCt_vfQr4GD5HtCg3rgGuepL8v0';
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'REPLACE_WITH_YOUR_SERVICE_ROLE_KEY';
+const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
 // Create Express app
 const app: Express = express();
@@ -87,13 +84,13 @@ interface VideoRecord {
 
 // Video transcoding function
 function transcodeVideo(
-  inputPath: string, 
-  outputPath: string, 
+  inputPath: string,
+  outputPath: string,
   quality: { height: number; crf: number }
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     console.log(`Starting transcode for quality ${quality.height}p...`);
-    
+
     const command = ffmpeg(inputPath)
       .videoCodec('libx264')
       .audioCodec('aac')
@@ -165,19 +162,19 @@ async function validateVideo(filePath: string): Promise<VideoMetadata> {
 function sanitizeVideoId(videoId: string): string {
   // Remove file extension
   const withoutExtension = videoId.replace(/\.[^/.]+$/, "");
-  
+
   // Replace special characters and spaces with hyphens
   const sanitized = withoutExtension
     .replace(/[^a-zA-Z0-9]/g, "-")
     .replace(/-+/g, "-")  // Replace multiple hyphens with single hyphen
     .replace(/^-+|-+$/g, "")  // Remove leading/trailing hyphens
     .toLowerCase();
-    
+
   // Ensure we have a valid ID (non-empty)
   if (!sanitized) {
     return `video-${Date.now()}`;
   }
-    
+
   // Trim to reasonable length
   return sanitized.slice(0, 100);
 }
@@ -195,9 +192,10 @@ app.post('/transcode', async (req: Request, res: Response) => {
   console.log('Raw request body:', JSON.stringify(req.body, null, 2));
   console.log('Message data:', req.body.message?.data);
   console.log('Direct data:', req.body.data);
+
   let data: ProcessingJob | undefined;
-  let sanitizedId = ''; // Initialize with empty string
-  
+  let sanitizedId = ''; // Initialise with empty string
+
   // Cleanup helper
   const cleanup = () => {
     tempFiles.forEach(file => {
@@ -211,18 +209,18 @@ app.post('/transcode', async (req: Request, res: Response) => {
       }
     });
   };
- 
+
   try {
     // Parse Cloud Storage event
     let storageEvent: CloudStorageEvent;
-    
+
     try {
       if (req.body.message?.data) {
         // Decode base64 Pub/Sub message
         const decodedData = Buffer.from(req.body.message.data, 'base64').toString();
         console.log('Decoded Cloud Storage event:', decodedData);
         const parsedData = JSON.parse(decodedData);
-        
+
         // Handle both new and legacy event formats
         storageEvent = {
           data: {
@@ -250,10 +248,15 @@ app.post('/transcode', async (req: Request, res: Response) => {
       if (!storageEvent.data.bucket || !storageEvent.data.name) {
         throw new Error('Missing required fields in message data');
       }
-
     } catch (error) {
       console.error('Failed to parse Cloud Storage event:', error);
       throw error;
+    }
+
+    // If this event is from the processed bucket, ignore it (to avoid infinite loops)
+    if (storageEvent.data.bucket === PROCESSED_BUCKET) {
+      console.log('Ignoring event for processed bucket');
+      return res.status(200).json({ message: 'Ignored processed bucket event' });
     }
 
     // Extract video ID from the file name
@@ -269,12 +272,28 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
     console.log('Created processing data job:', data);
 
-    // Sanitize the video ID and assign to our scoped variable
+    // Sanitise the video ID and assign to our scoped variable
     sanitizedId = sanitizeVideoId(data.videoId);
-    console.log('Sanitized video ID:', sanitizedId);
-    
-    
-    // Setup temporary file paths
+    console.log('Sanitised video ID:', sanitizedId);
+
+    // Insert or upsert initial record in Supabase with status 'processing'
+    {
+      const { error: processingError } = await supabase
+        .from('videos')
+        .upsert({
+          id: sanitizedId,
+          title: path.basename(data.videoId, path.extname(data.videoId)),
+          status: 'processing',
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+      if (processingError) {
+        console.error('Failed to mark video as processing in Supabase:', processingError);
+        throw processingError;
+      }
+    }
+
+    // Set up temporary file paths
     const tempInputFile = path.join('/tmp', `${data.videoId}_input.mp4`);
     tempFiles.push(tempInputFile);
 
@@ -300,71 +319,38 @@ app.post('/transcode', async (req: Request, res: Response) => {
 
       await transcodeVideo(tempInputFile, tempOutputFile, settings);
 
-      // Upload to GCS
+      // Upload to GCS processed bucket
       const destination = `processed/${data.videoId}/${quality}.mp4`;
-      await storage.bucket(BUCKET_NAME).upload(tempOutputFile, { destination });
-      
-      processedFiles[quality] = `gs://${BUCKET_NAME}/${destination}`;
+      await storage.bucket(PROCESSED_BUCKET).upload(tempOutputFile, { destination });
+
+      processedFiles[quality] = `gs://${PROCESSED_BUCKET}/${destination}`;
     }
 
-    // Add this before the cleanup() call in the try block
-    const videoRecord: VideoRecord = {
-      id: sanitizedId,
-      title: path.basename(data.videoId, path.extname(data.videoId)),
-      status: 'completed',
-      metadata: {
-        duration: metadata.duration,
-        format: metadata.format,
-        width: metadata.width,
-        height: metadata.height
-      },
-      processed_videos: processedFiles
-    };
+    // Update record with metadata and status 'completed'
+    {
+      const { error: completeError } = await supabase
+        .from('videos')
+        .update({
+          status: 'completed',
+          updated_at: new Date().toISOString(),
+          metadata: {
+            duration: metadata.duration,
+            format: metadata.format,
+            width: metadata.width,
+            height: metadata.height
+          },
+          processed_videos: processedFiles
+        })
+        .eq('id', sanitizedId);
 
-    // Store in Supabase
-    const { error } = await supabase
-      .from('videos')
-      .upsert(videoRecord, {
-        onConflict: 'id'
-      });
-
-    if (error) {
-      console.error('Failed to store video metadata in Supabase:', error);
-      throw error;
-    }
-
-    console.log('Successfully stored video metadata in Supabase');
-
-    // Create initial record in Supabase
-    const { error: insertError } = await supabase
-      .from('videos')
-      .insert({
-        id: sanitizedId,
-        title: path.basename(data.videoId, path.extname(data.videoId)),
-        status: 'processing'
-      });
-
-    if (insertError) {
-      console.error('Failed to create initial video record in Supabase:', insertError);
-      throw insertError;
+      if (completeError) {
+        console.error('Failed to store video metadata in Supabase:', completeError);
+        throw completeError;
+      }
     }
 
     console.log(`Successfully processed video ${data.videoId}`);
     cleanup();
-
-    if (sanitizedId) {
-      const { error: updateError } = await supabase
-        .from('videos')
-        .update({
-          status: 'failed',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', sanitizedId);
-
-      if (updateError) {
-        console.error('Failed to update video status in Supabase:', updateError);
-      }
-    }
 
     return res.status(200).json({ message: 'Processing completed successfully' });
 
@@ -377,6 +363,7 @@ app.post('/transcode', async (req: Request, res: Response) => {
       stack: error.stack
     });
 
+    // Update record with status 'failed'
     if (sanitizedId) {
       const { error: updateError } = await supabase
         .from('videos')
@@ -403,6 +390,3 @@ app.listen(port, () => {
 });
 
 export default app;
-
-
-
