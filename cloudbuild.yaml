@@ -32,6 +32,8 @@ steps:
       - '1800s'
       - '--concurrency'
       - '1'
+      - '--set-env-vars'
+      - 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,STORAGE_BUCKET=raot-tube-videos'
 
 images:
   - 'gcr.io/$PROJECT_ID/video-processor'
